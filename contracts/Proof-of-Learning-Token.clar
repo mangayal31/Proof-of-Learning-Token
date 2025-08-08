@@ -9,6 +9,12 @@
 (define-constant err-quiz-already-taken (err u107))
 (define-constant err-unauthorized (err u108))
 
+(define-constant err-invalid-milestone (err u109))
+(define-constant milestone-bronze-threshold u3)
+(define-constant milestone-silver-threshold u7)  
+(define-constant milestone-gold-threshold u15)
+(define-constant milestone-platinum-threshold u25)
+
 (define-fungible-token learning-token)
 
 (define-data-var token-name (string-ascii 32) "Proof-of-Learning-Token")
@@ -185,3 +191,75 @@
 )
 
 (map-set reviewers contract-owner true)
+
+(define-map learner-milestones principal 
+    { bronze: bool, silver: bool, gold: bool, platinum: bool, last-bonus-block: uint })
+
+(define-private (calculate-learner-score (learner principal))
+    (let 
+        (
+            (quiz-count (get-learner-quiz-count learner))
+            (project-count (get-learner-project-count learner))
+            (total-score (+ quiz-count (* project-count u2)))
+        )
+        total-score
+    )
+)
+
+(define-private (get-milestone-tier (score uint))
+    (if (>= score milestone-platinum-threshold) u4
+        (if (>= score milestone-gold-threshold) u3
+            (if (>= score milestone-silver-threshold) u2
+                (if (>= score milestone-bronze-threshold) u1 u0)
+            )
+        )
+    )
+)
+
+(define-public (check-milestone-progress (learner principal))
+    (let
+        (
+            (current-score (calculate-learner-score learner))
+            (current-tier (get-milestone-tier current-score))
+            (existing-data (default-to { bronze: false, silver: false, gold: false, platinum: false, last-bonus-block: u0 } 
+                                       (map-get? learner-milestones learner)))
+            (bonus-tokens u0)
+        )
+        (let 
+            (
+                (updated-data (merge existing-data 
+                    {
+                        bronze: (or (get bronze existing-data) (>= current-tier u1)),
+                        silver: (or (get silver existing-data) (>= current-tier u2)),
+                        gold: (or (get gold existing-data) (>= current-tier u3)),
+                        platinum: (or (get platinum existing-data) (>= current-tier u4))
+                    }))
+                (new-achievements (+ 
+                    (if (and (>= current-tier u1) (not (get bronze existing-data))) u1 u0)
+                    (if (and (>= current-tier u2) (not (get silver existing-data))) u1 u0)
+                    (if (and (>= current-tier u3) (not (get gold existing-data))) u1 u0)
+                    (if (and (>= current-tier u4) (not (get platinum existing-data))) u1 u0)))
+            )
+            (map-set learner-milestones learner 
+                (merge updated-data { last-bonus-block: stacks-block-height }))
+            (if (> new-achievements u0)
+                (ft-mint? learning-token (* new-achievements u25000000) learner)
+                (ok true)
+            )
+        )
+    )
+)
+
+(define-read-only (get-learner-milestones (learner principal))
+    (let
+        (
+            (current-score (calculate-learner-score learner))
+            (milestone-data (map-get? learner-milestones learner))
+        )
+        (ok { 
+            current-score: current-score,
+            current-tier: (get-milestone-tier current-score),
+            milestones: milestone-data
+        })
+    )
+)
