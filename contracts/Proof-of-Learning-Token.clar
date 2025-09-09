@@ -15,6 +15,10 @@
 (define-constant milestone-gold-threshold u15)
 (define-constant milestone-platinum-threshold u25)
 
+(define-constant err-no-recent-activity (err u110))
+(define-constant streak-bonus-base u5000000)
+(define-constant max-streak-bonus-days u30)
+
 (define-fungible-token learning-token)
 
 (define-data-var token-name (string-ascii 32) "Proof-of-Learning-Token")
@@ -261,5 +265,72 @@
             current-tier: (get-milestone-tier current-score),
             milestones: milestone-data
         })
+    )
+)
+
+
+(define-map learner-streaks principal 
+    { current-streak: uint, longest-streak: uint, last-activity-day: uint, total-bonus-earned: uint })
+
+(define-private (get-day-from-block (height uint))
+    (/ height u144)
+)
+
+(define-private (calculate-streak-bonus (streak-days uint))
+    (if (<= streak-days u0) u0
+        (let ((bonus-multiplier (if (> streak-days max-streak-bonus-days) max-streak-bonus-days streak-days)))
+            (* streak-bonus-base bonus-multiplier)
+        )
+    )
+)
+
+(define-public (update-learning-streak (learner principal))
+    (let
+        (
+            (current-day (get-day-from-block stacks-block-height))
+            (existing-data (default-to 
+                { current-streak: u0, longest-streak: u0, last-activity-day: u0, total-bonus-earned: u0 }
+                (map-get? learner-streaks learner)))
+            (last-day (get last-activity-day existing-data))
+            (current-streak (get current-streak existing-data))
+            (longest-streak (get longest-streak existing-data))
+        )
+        (let
+            (
+                (days-since-last (if (> current-day last-day) (- current-day last-day) u0))
+                (new-streak (if (is-eq days-since-last u1) 
+                               (+ current-streak u1)
+                               (if (is-eq days-since-last u0) current-streak u1)))
+                (new-longest (if (> new-streak longest-streak) new-streak longest-streak))
+                (streak-bonus (if (and (> new-streak current-streak) (> new-streak u2))
+                                 (calculate-streak-bonus new-streak) u0))
+            )
+            (map-set learner-streaks learner
+                { current-streak: new-streak, 
+                  longest-streak: new-longest,
+                  last-activity-day: current-day,
+                  total-bonus-earned: (+ (get total-bonus-earned existing-data) streak-bonus) })
+            (if (> streak-bonus u0)
+                (ft-mint? learning-token streak-bonus learner)
+                (ok true)
+            )
+        )
+    )
+)
+
+(define-read-only (get-learner-streak (learner principal))
+    (let
+        (
+            (current-day (get-day-from-block stacks-block-height))
+            (streak-data (map-get? learner-streaks learner))
+        )
+        (match streak-data
+            data (let ((days-since (if (> current-day (get last-activity-day data)) 
+                                     (- current-day (get last-activity-day data)) u0)))
+                     (ok (merge data { days-since-last-activity: days-since,
+                                     streak-expired: (> days-since u1) })))
+            (ok { current-streak: u0, longest-streak: u0, last-activity-day: u0, 
+                  total-bonus-earned: u0, days-since-last-activity: u0, streak-expired: true })
+        )
     )
 )
