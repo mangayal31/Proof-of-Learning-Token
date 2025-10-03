@@ -19,6 +19,12 @@
 (define-constant streak-bonus-base u5000000)
 (define-constant max-streak-bonus-days u30)
 
+(define-constant err-self-recognition (err u111))
+(define-constant err-daily-limit-reached (err u112))
+(define-constant err-invalid-badge-type (err u113))
+(define-constant recognition-token-amount u2000000)
+(define-constant max-daily-recognitions u5)
+
 (define-fungible-token learning-token)
 
 (define-data-var token-name (string-ascii 32) "Proof-of-Learning-Token")
@@ -334,3 +340,83 @@
         )
     )
 )
+
+
+(define-map peer-recognitions 
+    { recipient: principal, endorser: principal, badge-id: uint }
+    { badge-type: (string-ascii 32), token-amount: uint, timestamp: uint, message: (string-utf8 256) })
+
+(define-map recognition-counts principal { given: uint, received: uint })
+
+(define-map daily-recognition-tracker 
+    { endorser: principal, day: uint }
+    { count: uint })
+
+(define-data-var recognition-nonce uint u0)
+
+(define-private (get-current-day)
+    (/ stacks-block-height u144))
+
+(define-private (is-valid-badge-type (badge-type (string-ascii 32)))
+    (or (is-eq badge-type "helpful-mentor")
+        (or (is-eq badge-type "great-collaborator")
+            (or (is-eq badge-type "inspiring-learner")
+                (is-eq badge-type "problem-solver")))))
+
+(define-public (grant-peer-recognition 
+    (recipient principal) 
+    (badge-type (string-ascii 32))
+    (message (string-utf8 256)))
+    (let
+        (
+            (endorser tx-sender)
+            (current-day (get-current-day))
+            (daily-key { endorser: endorser, day: current-day })
+            (daily-count (default-to { count: u0 } (map-get? daily-recognition-tracker daily-key)))
+            (badge-id (var-get recognition-nonce))
+            (recipient-counts (default-to { given: u0, received: u0 } 
+                (map-get? recognition-counts recipient)))
+            (endorser-counts (default-to { given: u0, received: u0 } 
+                (map-get? recognition-counts endorser)))
+        )
+        (asserts! (not (is-eq endorser recipient)) err-self-recognition)
+        (asserts! (< (get count daily-count) max-daily-recognitions) err-daily-limit-reached)
+        (asserts! (is-valid-badge-type badge-type) err-invalid-badge-type)
+        (asserts! (>= (ft-get-balance learning-token endorser) recognition-token-amount) 
+            err-insufficient-balance)
+        
+        (try! (ft-transfer? learning-token recognition-token-amount endorser recipient))
+        
+        (map-set peer-recognitions
+            { recipient: recipient, endorser: endorser, badge-id: badge-id }
+            { badge-type: badge-type, token-amount: recognition-token-amount, 
+              timestamp: stacks-block-height, message: message })
+        
+        (map-set daily-recognition-tracker daily-key 
+            { count: (+ (get count daily-count) u1) })
+        
+        (map-set recognition-counts recipient 
+            { given: (get given recipient-counts), 
+              received: (+ (get received recipient-counts) u1) })
+        
+        (map-set recognition-counts endorser 
+            { given: (+ (get given endorser-counts) u1), 
+              received: (get received endorser-counts) })
+        
+        (var-set recognition-nonce (+ badge-id u1))
+        (ok badge-id)))
+
+(define-read-only (get-recognition-stats (learner principal))
+    (ok (default-to { given: u0, received: u0 } 
+        (map-get? recognition-counts learner))))
+
+(define-read-only (get-daily-recognition-count (endorser principal))
+    (let ((current-day (get-current-day)))
+        (ok (get count (default-to { count: u0 } 
+            (map-get? daily-recognition-tracker { endorser: endorser, day: current-day }))))))
+
+(define-read-only (get-recognition-details 
+    (recipient principal) 
+    (endorser principal) 
+    (badge-id uint))
+    (ok (map-get? peer-recognitions { recipient: recipient, endorser: endorser, badge-id: badge-id })))
