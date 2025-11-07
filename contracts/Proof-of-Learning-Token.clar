@@ -25,6 +25,12 @@
 (define-constant recognition-token-amount u2000000)
 (define-constant max-daily-recognitions u5)
 
+(define-constant err-path-not-found (err u114))
+(define-constant err-already-enrolled (err u115))
+(define-constant err-path-incomplete (err u116))
+(define-constant err-already-certified (err u117))
+(define-constant certification-bonus-multiplier u3)
+
 (define-fungible-token learning-token)
 
 (define-data-var token-name (string-ascii 32) "Proof-of-Learning-Token")
@@ -420,3 +426,85 @@
     (endorser principal) 
     (badge-id uint))
     (ok (map-get? peer-recognitions { recipient: recipient, endorser: endorser, badge-id: badge-id })))
+
+
+(define-map learning-paths
+    { path-id: (string-ascii 64) }
+    { 
+        path-name: (string-utf8 128),
+        creator: principal,
+        required-quizzes: (list 10 (string-ascii 64)),
+        required-projects: (list 5 (string-ascii 64)),
+        certification-bonus: uint,
+        active: bool,
+        created-at: uint
+    })
+
+(define-map learner-path-enrollments
+    { learner: principal, path-id: (string-ascii 64) }
+    { 
+        enrolled-at: uint,
+        completed-quizzes: (list 10 (string-ascii 64)),
+        completed-projects: (list 5 (string-ascii 64)),
+        certified: bool,
+        certification-date: uint
+    })
+
+(define-public (create-learning-path
+    (path-id (string-ascii 64))
+    (path-name (string-utf8 128))
+    (required-quizzes (list 10 (string-ascii 64)))
+    (required-projects (list 5 (string-ascii 64)))
+    (base-bonus uint))
+    (begin
+        (asserts! (is-some (map-get? reviewers tx-sender)) err-unauthorized)
+        (ok (map-set learning-paths
+            { path-id: path-id }
+            {
+                path-name: path-name,
+                creator: tx-sender,
+                required-quizzes: required-quizzes,
+                required-projects: required-projects,
+                certification-bonus: (* base-bonus certification-bonus-multiplier),
+                active: true,
+                created-at: stacks-block-height
+            }))))
+
+(define-public (enroll-in-path (path-id (string-ascii 64)))
+    (let
+        ((path-data (unwrap! (map-get? learning-paths { path-id: path-id }) err-path-not-found)))
+        (asserts! (get active path-data) err-path-not-found)
+        (asserts! (is-none (map-get? learner-path-enrollments 
+            { learner: tx-sender, path-id: path-id })) err-already-enrolled)
+        (ok (map-set learner-path-enrollments
+            { learner: tx-sender, path-id: path-id }
+            {
+                enrolled-at: stacks-block-height,
+                completed-quizzes: (list),
+                completed-projects: (list),
+                certified: false,
+                certification-date: u0
+            }))))
+
+(define-public (claim-certification (path-id (string-ascii 64)))
+    (let
+        (
+            (path-data (unwrap! (map-get? learning-paths { path-id: path-id }) err-path-not-found))
+            (enrollment (unwrap! (map-get? learner-path-enrollments 
+                { learner: tx-sender, path-id: path-id }) err-path-not-found))
+        )
+        (asserts! (not (get certified enrollment)) err-already-certified)
+        (asserts! (is-eq (len (get completed-quizzes enrollment)) 
+            (len (get required-quizzes path-data))) err-path-incomplete)
+        (asserts! (is-eq (len (get completed-projects enrollment)) 
+            (len (get required-projects path-data))) err-path-incomplete)
+        (map-set learner-path-enrollments
+            { learner: tx-sender, path-id: path-id }
+            (merge enrollment { certified: true, certification-date: stacks-block-height }))
+        (ft-mint? learning-token (get certification-bonus path-data) tx-sender)))
+
+(define-read-only (get-learning-path (path-id (string-ascii 64)))
+    (ok (map-get? learning-paths { path-id: path-id })))
+
+(define-read-only (get-enrollment-status (learner principal) (path-id (string-ascii 64)))
+    (ok (map-get? learner-path-enrollments { learner: learner, path-id: path-id })))
